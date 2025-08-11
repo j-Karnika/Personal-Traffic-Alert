@@ -11,6 +11,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
 
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables.")
+
 # ==== CONFIGURATION ====
 TRAFFIC_DELAY_THRESHOLD_MINS = 5  # Only alert if delay > 5 minutes
 MINOR_DELAY_THRESHOLD_MINS = 2    # Show minor delay info but no urgent alert
@@ -416,3 +419,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
