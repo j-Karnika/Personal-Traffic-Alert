@@ -227,8 +227,8 @@ async def async_scheduler():
         try:
             now = datetime.now()
             
-            # Debug log every 10 minutes
-            if now.minute % 10 == 0 and now.second < 30:
+            # Debug log every 5 minutes instead of 10
+            if now.minute % 5 == 0 and now.second < 30:
                 logging.info(f"💓 Scheduler heartbeat - Active users: {len(user_next_checks)}")
                 for chat_id, checks in user_next_checks.items():
                     logging.info(f"  User {chat_id}: Office {checks.get('office', 'N/A')}, Home {checks.get('home', 'N/A')}")
@@ -384,6 +384,48 @@ async def message_queue_processor():
             logging.error(f"💥 Error processing message queue: {e}")
             await asyncio.sleep(5)  # Wait 5 seconds on error
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Debug command to check scheduler status."""
+    chat_id = update.message.chat_id
+    now = datetime.now()
+    
+    message = f"🔍 Debug Info (Time: {now.strftime('%H:%M:%S')})\n\n"
+    
+    # Check user data
+    data = user_data.get(chat_id)
+    if data:
+        message += f"✅ User data exists\n"
+        message += f"🏠➡️🏢 Office time: {data.get('office_start_time', 'N/A')}\n"
+        message += f"🏢➡️🏠 Home time: {data.get('home_start_time', 'N/A')}\n"
+    else:
+        message += f"❌ No user data found\n"
+    
+    # Check scheduler
+    checks = user_next_checks.get(chat_id)
+    if checks:
+        message += f"\n✅ Scheduler active\n"
+        office_next = checks.get("office")
+        home_next = checks.get("home")
+        office_end = checks.get("office_end")
+        home_end = checks.get("home_end")
+        
+        message += f"🏠➡️🏢 Office window: {office_next.strftime('%H:%M') if office_next else 'N/A'} to {office_end.strftime('%H:%M') if office_end else 'N/A'}\n"
+        message += f"🏢➡️🏠 Home window: {home_next.strftime('%H:%M') if home_next else 'N/A'} to {home_end.strftime('%H:%M') if home_end else 'N/A'}\n"
+        
+        # Check if in active window
+        if office_next and office_end and office_next <= now <= office_end:
+            message += f"🟢 Currently in OFFICE window\n"
+        elif home_next and home_end and home_next <= now <= home_end:
+            message += f"🟢 Currently in HOME window\n"
+        else:
+            message += f"🔴 Not in any active window\n"
+    else:
+        message += f"\n❌ Scheduler not active\n"
+    
+    message += f"\n📊 Total active users: {len(user_next_checks)}"
+    
+    await update.message.reply_text(message)
+
 # ==== TEST COMMAND (ADDED FOR DEBUGGING) ====
 
 async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -506,6 +548,7 @@ def main():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("test", test_command))  # Added test command
+    app.add_handler(CommandHandler("debug", debug_command))  # Added debug command
     
     # Message handlers
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
@@ -514,8 +557,12 @@ def main():
     logging.info("🤖 Traffic Alert Bot is starting...")
     print("🤖 Traffic Alert Bot is running...")
     
-    # Get event loop
-    loop = asyncio.get_event_loop()
+    # Create and set new event loop for Railway compatibility
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     # Start background tasks
     loop.create_task(message_queue_processor())
