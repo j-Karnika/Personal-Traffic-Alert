@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import asyncio
 import os
 import requests
+import pytz
 from queue import Queue
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -38,6 +39,11 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+# ==== Fixing TimeZone to India ======
+IST = pytz.timezone("Asia/Kolkata")
+def now_ist():
+    return datetime.now(IST)
 
 # ==== BOT COMMANDS AND HANDLERS ====
 
@@ -163,11 +169,13 @@ async def schedule_tracking(chat_id):
         return
 
     now = datetime.now()
-    today = now.date()
+    today = now_ist().date()
+    # today = now.date()
     logging.info(f"🕐 Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def next_check_time(base_time, before_mins, after_mins):
-        base_datetime = datetime.combine(today, base_time)
+        # base_datetime = datetime.combine(today, base_time)
+        base_datetime = IST.localize(datetime.combine(today, base_time))
         start_check = base_datetime - timedelta(minutes=before_mins)
         end_check = base_datetime + timedelta(minutes=after_mins)
         
