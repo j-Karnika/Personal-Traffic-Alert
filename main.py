@@ -8,8 +8,8 @@ from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ==== PLACEHOLDER VALUES ====
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TOMTOM_API_KEY = os.getenv("TOMTOM_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TOMTOM_API_KEY = os.getenv('TOMTOM_API_KEY')
 
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables.")
@@ -419,4 +419,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
