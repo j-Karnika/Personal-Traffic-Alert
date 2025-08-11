@@ -7,12 +7,9 @@ from queue import Queue
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==== PLACEHOLDER VALUES ====
+# ==== ENVIRONMENT VARIABLES ====
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TOMTOM_API_KEY = os.getenv('TOMTOM_API_KEY')
-
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("No TELEGRAM_BOT_TOKEN found in environment variables.")
 
 # ==== CONFIGURATION ====
 TRAFFIC_DELAY_THRESHOLD_MINS = 5  # Only alert if delay > 5 minutes
@@ -151,28 +148,35 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Start async tracking scheduler for this user
         await schedule_tracking(chat_id)
+        logging.info(f"✅ Async tracking initialized for user {chat_id}")
         
     else:
         await update.message.reply_text("Please use /start to begin setup.")
 
-# ==== ASYNC SCHEDULER LOGIC ====
+# ==== ASYNC SCHEDULER LOGIC (FIXED) ====
 
 async def schedule_tracking(chat_id):
     """Initialize next check times for the user."""
     data = user_data.get(chat_id)
     if not data:
+        logging.error(f"❌ No user data found for chat_id {chat_id}")
         return
 
     now = datetime.now()
     today = now.date()
+    logging.info(f"🕐 Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def next_check_time(base_time, before_mins, after_mins):
-        start_check = datetime.combine(today, base_time) - timedelta(minutes=before_mins)
-        end_check = datetime.combine(today, base_time) + timedelta(minutes=after_mins)
+        base_datetime = datetime.combine(today, base_time)
+        start_check = base_datetime - timedelta(minutes=before_mins)
+        end_check = base_datetime + timedelta(minutes=after_mins)
+        
+        # If both times are in the past, schedule for next day
         if end_check < now:
-            # schedule for next day
             start_check += timedelta(days=1)
             end_check += timedelta(days=1)
+            logging.info(f"📅 Scheduled for next day: {start_check.strftime('%Y-%m-%d %H:%M')}")
+        
         return start_check, end_check
 
     office_start, office_end = next_check_time(data["office_start_time"], 30, 30)
@@ -184,14 +188,20 @@ async def schedule_tracking(chat_id):
         "office_end": office_end,
         "home_end": home_end
     }
+    
+    logging.info(f"📋 User {chat_id} schedule:")
+    logging.info(f"  🏠➡️🏢 Office window: {office_start.strftime('%H:%M')} to {office_end.strftime('%H:%M')}")
+    logging.info(f"  🏢➡️🏠 Home window: {home_start.strftime('%H:%M')} to {home_end.strftime('%H:%M')}")
 
 async def schedule_tracking_for_mode(chat_id, mode):
     """Schedule the next day's tracking window for a specific mode."""
     data = user_data.get(chat_id)
     if not data:
+        logging.error(f"❌ No user data for rescheduling {mode} mode for chat_id {chat_id}")
         return
 
     tomorrow = datetime.now().date() + timedelta(days=1)
+    logging.info(f"📅 Rescheduling {mode} mode for user {chat_id} to tomorrow")
 
     if mode == "office":
         office_time = data["office_start_time"]
@@ -199,6 +209,7 @@ async def schedule_tracking_for_mode(chat_id, mode):
         end_check = datetime.combine(tomorrow, office_time) + timedelta(minutes=30)
         user_next_checks[chat_id]["office"] = start_check
         user_next_checks[chat_id]["office_end"] = end_check
+        logging.info(f"  🏠➡️🏢 Next office window: {start_check.strftime('%H:%M')} to {end_check.strftime('%H:%M')}")
 
     elif mode == "home":
         home_time = data["home_start_time"]
@@ -206,46 +217,71 @@ async def schedule_tracking_for_mode(chat_id, mode):
         end_check = datetime.combine(tomorrow, home_time) + timedelta(minutes=30)
         user_next_checks[chat_id]["home"] = start_check
         user_next_checks[chat_id]["home_end"] = end_check
+        logging.info(f"  🏢➡️🏠 Next home window: {start_check.strftime('%H:%M')} to {end_check.strftime('%H:%M')}")
 
 async def async_scheduler():
     """Main async scheduler loop checking all users and sending updates."""
+    logging.info("🚀 Async scheduler started!")
+    
     while True:
-        now = datetime.now()
-        for chat_id, checks in list(user_next_checks.items()):
-            data = user_data.get(chat_id)
-            if not data:
-                continue
+        try:
+            now = datetime.now()
+            
+            # Debug log every 10 minutes
+            if now.minute % 10 == 0 and now.second < 30:
+                logging.info(f"💓 Scheduler heartbeat - Active users: {len(user_next_checks)}")
+                for chat_id, checks in user_next_checks.items():
+                    logging.info(f"  User {chat_id}: Office {checks.get('office', 'N/A')}, Home {checks.get('home', 'N/A')}")
+            
+            for chat_id, checks in list(user_next_checks.items()):
+                data = user_data.get(chat_id)
+                if not data:
+                    logging.warning(f"⚠️ No user data for chat_id {chat_id}, removing from scheduler")
+                    del user_next_checks[chat_id]
+                    continue
 
-            # OFFICE check window
-            if checks.get("office") and checks.get("office_end") and checks["office"] <= now <= checks["office_end"]:
-                if now >= checks["office"]:
-                    await send_tomtom_update_async(chat_id, "office")
-                    user_next_checks[chat_id]["office"] = now + timedelta(minutes=2)
-            elif checks.get("office_end") and now > checks["office_end"]:
-                await schedule_tracking_for_mode(chat_id, "office")
+                # OFFICE check window
+                if checks.get("office") and checks.get("office_end"):
+                    if checks["office"] <= now <= checks["office_end"]:
+                        if now >= checks["office"]:
+                            logging.info(f"🏠➡️🏢 Sending office traffic update for user {chat_id}")
+                            await send_tomtom_update_async(chat_id, "office")
+                            # Schedule next check in 2 minutes (changed from 15 to 2)
+                            user_next_checks[chat_id]["office"] = now + timedelta(minutes=2)
+                    elif now > checks["office_end"]:
+                        logging.info(f"📅 Office window ended for user {chat_id}, scheduling for tomorrow")
+                        await schedule_tracking_for_mode(chat_id, "office")
 
-            # HOME check window
-            if checks.get("home") and checks.get("home_end") and checks["home"] <= now <= checks["home_end"]:
-                if now >= checks["home"]:
-                    await send_tomtom_update_async(chat_id, "home")
-                    user_next_checks[chat_id]["home"] = now + timedelta(minutes=2)
-            elif checks.get("home_end") and now > checks["home_end"]:
-                await schedule_tracking_for_mode(chat_id, "home")
+                # HOME check window
+                if checks.get("home") and checks.get("home_end"):
+                    if checks["home"] <= now <= checks["home_end"]:
+                        if now >= checks["home"]:
+                            logging.info(f"🏢➡️🏠 Sending home traffic update for user {chat_id}")
+                            await send_tomtom_update_async(chat_id, "home")
+                            # Schedule next check in 2 minutes (changed from 15 to 2)
+                            user_next_checks[chat_id]["home"] = now + timedelta(minutes=2)
+                    elif now > checks["home_end"]:
+                        logging.info(f"📅 Home window ended for user {chat_id}, scheduling for tomorrow")
+                        await schedule_tracking_for_mode(chat_id, "home")
 
-        await asyncio.sleep(60)  # Check every minute
+        except Exception as e:
+            logging.error(f"💥 Error in async scheduler: {e}")
+        
+        await asyncio.sleep(30)  # Check every 30 seconds (reduced from 60)
 
 async def send_tomtom_update_async(chat_id, mode):
     """Async wrapper for sending TomTom update (calls sync code inside)."""
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, send_tomtom_update, chat_id, mode)
 
-# ==== EXISTING SYNC FUNCTION FOR TOMTOM API ====
+# ==== TOMTOM API FUNCTION (ENHANCED LOGGING) ====
 
 def send_tomtom_update(chat_id, mode):
     """Send traffic update using TomTom API."""
     try:
         data = user_data.get(chat_id)
         if not data:
+            logging.error(f"❌ No user data found for TomTom update - chat_id: {chat_id}")
             return
         
         if mode == "office":
@@ -259,6 +295,9 @@ def send_tomtom_update(chat_id, mode):
             end_lat, end_lon = data["home_lat"], data["home_lon"]
             route_desc = "🏢➡️🏠 Office to Home"
         
+        logging.info(f"🚗 Fetching traffic data for {route_desc} (User: {chat_id})")
+        logging.info(f"📍 Route: ({start_lat:.4f},{start_lon:.4f}) → ({end_lat:.4f},{end_lon:.4f})")
+        
         url = f"https://api.tomtom.com/routing/1/calculateRoute/{start_lat},{start_lon}:{end_lat},{end_lon}/json"
         params = {
             'key': TOMTOM_API_KEY,
@@ -266,10 +305,13 @@ def send_tomtom_update(chat_id, mode):
             'departAt': datetime.now().isoformat()
         }
         
+        logging.info(f"🌐 Making TomTom API request...")
         response = requests.get(url, params=params, timeout=10)
+        logging.info(f"📡 TomTom API response: {response.status_code}")
         
         if response.status_code == 200:
             route_data = response.json()
+            logging.info("✅ TomTom API response received successfully")
             
             if route_data.get("routes"):
                 summary = route_data["routes"][0]["summary"]
@@ -278,6 +320,7 @@ def send_tomtom_update(chat_id, mode):
                 delay_mins = delay_seconds // 60
                 
                 current_time = datetime.now().strftime("%H:%M")
+                logging.info(f"📊 Traffic data: {travel_time_mins}min travel, {delay_mins}min delay")
                 
                 # Smart delay alerting with thresholds
                 if delay_mins >= TRAFFIC_DELAY_THRESHOLD_MINS:
@@ -308,33 +351,59 @@ def send_tomtom_update(chat_id, mode):
                     )
             else:
                 message = f"❌ No route found for {route_desc}"
+                logging.warning("⚠️ No routes found in TomTom response")
         else:
             message = f"❌ Failed to fetch traffic data for {route_desc} (Status: {response.status_code})"
+            logging.error(f"❌ TomTom API error: {response.status_code} - {response.text}")
         
         # Add message to queue for thread-safe sending
         message_queue.put((chat_id, message))
+        logging.info(f"📨 Message queued for user {chat_id}")
         
     except Exception as e:
-        logging.error(f"Error sending TomTom update: {e}")
+        logging.error(f"💥 Error in send_tomtom_update: {e}")
         message_queue.put((chat_id, f"❌ Error getting traffic update: {str(e)}"))
 
-# ==== MESSAGE QUEUE PROCESSOR ====
+# ==== MESSAGE QUEUE PROCESSOR (ENHANCED) ====
 
 async def message_queue_processor():
     """Process messages from the queue and send them."""
+    logging.info("📬 Message queue processor started!")
+    
     while True:
         try:
             if not message_queue.empty():
                 chat_id, message = message_queue.get_nowait()
+                logging.info(f"📤 Sending message to user {chat_id}")
                 await app.bot.send_message(chat_id=chat_id, text=message)
                 message_queue.task_done()
+                logging.info(f"✅ Message sent successfully to user {chat_id}")
             else:
                 await asyncio.sleep(1)  # Wait 1 second before checking again
         except Exception as e:
-            logging.error(f"Error processing message queue: {e}")
+            logging.error(f"💥 Error processing message queue: {e}")
             await asyncio.sleep(5)  # Wait 5 seconds on error
 
-# ==== OTHER COMMANDS (status, settings) ====
+# ==== TEST COMMAND (ADDED FOR DEBUGGING) ====
+
+async def test_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+    data = user_data.get(chat_id)
+    state = user_state.get(chat_id)
+    
+    if not data or state != STATE_SETUP_COMPLETE:
+        await update.message.reply_text(
+            "❌ Setup not complete. Please use /start to configure your commute."
+        )
+        return
+    
+    await update.message.reply_text("🧪 Testing traffic update... Please wait.")
+    
+    # Send immediate test update
+    await send_tomtom_update_async(chat_id, "office")
+    logging.info(f"🧪 Test traffic update triggered for user {chat_id}")
+
+# ==== OTHER COMMANDS ====
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -374,50 +443,87 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     office_time = data["office_start_time"].strftime("%H:%M")
     home_time = data["home_start_time"].strftime("%H:%M")
     
+    # Check if user is in scheduler
+    is_scheduled = chat_id in user_next_checks
+    next_checks = user_next_checks.get(chat_id, {})
+    
     message = (
         f"📊 Traffic Bot Status\n\n"
         f"📋 Your Schedule:\n"
         f"🏠➡️🏢 Office departure: {office_time}\n"
         f"🏢➡️🏠 Home departure: {home_time}\n\n"
         f"📍 Locations configured: ✅\n"
-        f"🤖 Monitoring active: ✅\n\n"
-        f"ℹ️ You'll receive updates:\n"
-        f"• 30 min before office time (until 30 min after)\n"
-        f"• 60 min before home time (until 30 min after)\n"
-        f"• Every 2 minutes during active periods"
+        f"🤖 Monitoring active: {'✅' if is_scheduled else '❌'}\n\n"
+    )
+    
+    if is_scheduled:
+        now = datetime.now()
+        office_next = next_checks.get("office")
+        home_next = next_checks.get("home")
+        
+        message += "⏰ Next Updates:\n"
+        if office_next:
+            if office_next > now:
+                message += f"🏠➡️🏢 Office: {office_next.strftime('%H:%M')}\n"
+            else:
+                message += f"🏠➡️🏢 Office: Active now\n"
+        
+        if home_next:
+            if home_next > now:
+                message += f"🏢➡️🏠 Home: {home_next.strftime('%H:%M')}\n"
+            else:
+                message += f"🏢➡️🏠 Home: Active now\n"
+    else:
+        message += "⚠️ Scheduler not active. Try /start to reinitialize."
+    
+    message += (
+        f"\n\nℹ️ Update frequency: Every 2 minutes during active periods\n"
+        f"🧪 Test now: /test"
     )
     
     await update.message.reply_text(message)
 
-# ==== MAIN FUNCTION ====
+# ==== MAIN FUNCTION (ENHANCED) ====
 
 def main():
     global app
+    
+    # Check environment variables
+    if not TELEGRAM_BOT_TOKEN:
+        logging.error("❌ TELEGRAM_BOT_TOKEN not found in environment variables!")
+        return
+    
+    if not TOMTOM_API_KEY:
+        logging.error("❌ TOMTOM_API_KEY not found in environment variables!")
+        return
+    
+    logging.info("✅ Environment variables loaded successfully")
+    
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
     # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("test", test_command))  # Added test command
     
     # Message handlers
     app.add_handler(MessageHandler(filters.LOCATION, location_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    logging.info("Bot starting...")
+    logging.info("🤖 Traffic Alert Bot is starting...")
     print("🤖 Traffic Alert Bot is running...")
     
     # Get event loop
     loop = asyncio.get_event_loop()
 
-    # Start message queue processor
+    # Start background tasks
     loop.create_task(message_queue_processor())
-    # Start async scheduler
     loop.create_task(async_scheduler())
+    
+    logging.info("🚀 Background tasks started!")
     
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
-
