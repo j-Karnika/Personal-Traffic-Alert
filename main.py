@@ -3,10 +3,17 @@ from datetime import datetime, timedelta
 import asyncio
 import os
 import requests
-import pytz
 from queue import Queue
+import pytz
 from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# ==== TIMEZONE CONFIGURATION ====
+IST = pytz.timezone('Asia/Kolkata')  # Indian Standard Time
+
+def now_ist():
+    """Get current time in IST"""
+    return datetime.now(IST)
 
 # ==== ENVIRONMENT VARIABLES ====
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -39,11 +46,6 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-
-# ==== Fixing TimeZone to India ======
-IST = pytz.timezone("Asia/Kolkata")
-def now_ist():
-    return datetime.now(IST)
 
 # ==== BOT COMMANDS AND HANDLERS ====
 
@@ -156,6 +158,13 @@ async def location_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await schedule_tracking(chat_id)
         logging.info(f"✅ Async tracking initialized for user {chat_id}")
         
+        # FORCE VERIFICATION: Check if user was actually added
+        if chat_id in user_next_checks:
+            logging.info(f"🎯 CONFIRMED: User {chat_id} successfully added to scheduler")
+        else:
+            logging.error(f"💥 FAILED: User {chat_id} NOT added to scheduler - calling again")
+            await schedule_tracking(chat_id)  # Try again
+        
     else:
         await update.message.reply_text("Please use /start to begin setup.")
 
@@ -168,14 +177,12 @@ async def schedule_tracking(chat_id):
         logging.error(f"❌ No user data found for chat_id {chat_id}")
         return
 
-    now = datetime.now()
-    today = now_ist().date()
-    # today = now.date()
-    logging.info(f"🕐 Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    now = now_ist().replace(tzinfo=None)  # Remove timezone info for comparison
+    today = now.date()
+    logging.info(f"🕐 Current IST time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
     def next_check_time(base_time, before_mins, after_mins):
-        # base_datetime = datetime.combine(today, base_time)
-        base_datetime = IST.localize(datetime.combine(today, base_time))
+        base_datetime = datetime.combine(today, base_time)
         start_check = base_datetime - timedelta(minutes=before_mins)
         end_check = base_datetime + timedelta(minutes=after_mins)
         
@@ -200,6 +207,10 @@ async def schedule_tracking(chat_id):
     logging.info(f"📋 User {chat_id} schedule:")
     logging.info(f"  🏠➡️🏢 Office window: {office_start.strftime('%H:%M')} to {office_end.strftime('%H:%M')}")
     logging.info(f"  🏢➡️🏠 Home window: {home_start.strftime('%H:%M')} to {home_end.strftime('%H:%M')}")
+    
+    # CRITICAL: Verify the user was actually added
+    logging.info(f"🔍 Verification - user_next_checks now has {len(user_next_checks)} users")
+    logging.info(f"🔍 User {chat_id} in scheduler: {chat_id in user_next_checks}")
 
 async def schedule_tracking_for_mode(chat_id, mode):
     """Schedule the next day's tracking window for a specific mode."""
@@ -208,7 +219,7 @@ async def schedule_tracking_for_mode(chat_id, mode):
         logging.error(f"❌ No user data for rescheduling {mode} mode for chat_id {chat_id}")
         return
 
-    tomorrow = datetime.now().date() + timedelta(days=1)
+    tomorrow = now_ist().date() + timedelta(days=1)
     logging.info(f"📅 Rescheduling {mode} mode for user {chat_id} to tomorrow")
 
     if mode == "office":
@@ -233,7 +244,7 @@ async def async_scheduler():
     
     while True:
         try:
-            now = datetime.now()
+            now = now_ist().replace(tzinfo=None)  # Remove timezone info for comparison
             
             # Debug log every 5 minutes instead of 10
             if now.minute % 5 == 0 and now.second < 30:
@@ -310,7 +321,7 @@ def send_tomtom_update(chat_id, mode):
         params = {
             'key': TOMTOM_API_KEY,
             'traffic': 'true',
-            'departAt': datetime.now().isoformat()
+            'departAt': now_ist().isoformat()
         }
         
         logging.info(f"🌐 Making TomTom API request...")
@@ -327,7 +338,7 @@ def send_tomtom_update(chat_id, mode):
                 delay_seconds = summary.get("trafficDelayInSeconds", 0)
                 delay_mins = delay_seconds // 60
                 
-                current_time = datetime.now().strftime("%H:%M")
+                current_time = now_ist().strftime("%H:%M")
                 logging.info(f"📊 Traffic data: {travel_time_mins}min travel, {delay_mins}min delay")
                 
                 # Smart delay alerting with thresholds
@@ -395,9 +406,9 @@ async def message_queue_processor():
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Debug command to check scheduler status."""
     chat_id = update.message.chat_id
-    now = datetime.now()
+    now = now_ist().replace(tzinfo=None)
     
-    message = f"🔍 Debug Info (Time: {now.strftime('%H:%M:%S')})\n\n"
+    message = f"🔍 Debug Info (IST Time: {now.strftime('%H:%M:%S')})\n\n"
     
     # Check user data
     data = user_data.get(chat_id)
@@ -499,7 +510,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message = (
         f"📊 Traffic Bot Status\n\n"
-        f"📋 Your Schedule:\n"
+        f"📋 Your Schedule (IST):\n"
         f"🏠➡️🏢 Office departure: {office_time}\n"
         f"🏢➡️🏠 Home departure: {home_time}\n\n"
         f"📍 Locations configured: ✅\n"
@@ -507,7 +518,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     if is_scheduled:
-        now = datetime.now()
+        now = now_ist().replace(tzinfo=None)
         office_next = next_checks.get("office")
         home_next = next_checks.get("home")
         
@@ -528,7 +539,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     message += (
         f"\n\nℹ️ Update frequency: Every 2 minutes during active periods\n"
-        f"🧪 Test now: /test"
+        f"🧪 Test now: /test\n"
+        f"🔍 Debug info: /debug"
     )
     
     await update.message.reply_text(message)
